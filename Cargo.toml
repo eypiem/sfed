@@ -11,3 +11,4 @@ pbkdf2 = "0.10.0"
 clap = { version = "3.0.6", features = ["derive"] }
 anyhow = "1.0.52"
 rand = "0.8.4"
+rpassword = "5.0"
