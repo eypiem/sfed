@@ -26,44 +26,32 @@ impl Crypto {
 
         let encrypted_key = Crypto::encrypt(&aes_key, &cipher, &aes_nonce)?;
 
-        let mut key_content = Vec::new();
-        key_content.extend(pbkdf2_salt.as_bytes().to_vec());
-        key_content.push(b'\n');
-        key_content.extend(aes_nonce);
-        key_content.push(b'\n');
-        key_content.extend(encrypted_key);
-        key_content.push(b'\n');
+        let key_content =
+            Crypto::create_key_content(pbkdf2_salt.as_bytes(), &aes_nonce, &encrypted_key);
 
         write_file(&self.key_path, key_content, true)?;
-        println!("Created key at {}.", self.key_path.display());
-        Ok(())
+        Ok(println!("Created key at {}.", self.key_path.display()))
     }
 
     pub fn change_password(&mut self, new_password: String) -> Result<()> {
         let aes_key = self.load_aes_key()?;
+        let aes_nonce = self.load_aes_nonce()?;
         self.password = new_password;
 
         let pbkdf2_salt = Crypto::new_pbkdf2_salt();
         let pbkdf2_key = Crypto::generate_pbkdf2_key(self.password.as_bytes(), &pbkdf2_salt)?;
         let cipher = Crypto::generate_aes_cipher(&pbkdf2_key);
-        let aes_nonce = self.load_aes_nonce()?;
 
         let encrypted_key = Crypto::encrypt(&aes_key, &cipher, &aes_nonce)?;
 
-        let mut key_content = Vec::new();
-        key_content.extend(pbkdf2_salt.as_bytes().to_vec());
-        key_content.push(b'\n');
-        key_content.extend(aes_nonce);
-        key_content.push(b'\n');
-        key_content.extend(encrypted_key);
-        key_content.push(b'\n');
+        let key_content =
+            Crypto::create_key_content(pbkdf2_salt.as_bytes(), &aes_nonce, &encrypted_key);
 
         write_file(&self.key_path, key_content, false)?;
-        println!(
+        Ok(println!(
             "Changed the password of key at {}.",
             self.key_path.display()
-        );
-        Ok(())
+        ))
     }
 
     pub fn encrypt_file(
@@ -76,8 +64,7 @@ impl Crypto {
         let content = read_file(&input)?;
         let cipher_text = Crypto::encrypt(&content, &cipher, &nonce)?;
         write_file(&output, cipher_text, true)?;
-        println!("File encrypted at {}.", output.display());
-        Ok(())
+        Ok(println!("File encrypted at {}.", output.display()))
     }
 
     pub fn decrypt_file(
@@ -90,8 +77,18 @@ impl Crypto {
         let content = read_file(&input)?;
         let plain_text = Crypto::decrypt(&content, &cipher, &nonce)?;
         write_file(&output, plain_text, true)?;
-        println!("File decrypted at {}.", output.display());
-        Ok(())
+        Ok(println!("File decrypted at {}.", output.display()))
+    }
+    
+    fn create_key_content(pbkdf2_salt: &[u8], aes_nonce: &[u8], encrypted_key: &[u8]) -> Vec<u8> {
+        let mut key_content = Vec::new();
+        key_content.extend(pbkdf2_salt);
+        key_content.push(b'\n');
+        key_content.extend(aes_nonce);
+        key_content.push(b'\n');
+        key_content.extend(encrypted_key);
+        key_content.push(b'\n');
+        key_content
     }
 
     fn encrypt(input: &Vec<u8>, cipher: &Aes256GcmSiv, nonce: &Nonce) -> Result<Vec<u8>> {
@@ -123,10 +120,7 @@ impl Crypto {
 
     fn load_pbkdf2_key(&self) -> Result<Vec<u8>> {
         let salt = self.load_pbkdf2_salt()?;
-        Ok(Crypto::generate_pbkdf2_key(
-            self.password.as_bytes(),
-            &salt,
-        )?)
+        Crypto::generate_pbkdf2_key(self.password.as_bytes(), &salt)
     }
 
     fn generate_pbkdf2_key(password: &[u8], salt: &String) -> Result<Vec<u8>> {
@@ -170,7 +164,7 @@ impl Crypto {
     fn load_aes_cipher(&self) -> Result<Aes256GcmSiv> {
         let key = match self.load_aes_key() {
             Ok(key) => key,
-            Err(_) => return Err(anyhow!("Key Authentication failure.")),
+            Err(_) => return Err(anyhow!("Key authentication failure.")),
         };
         println!("Key authenticated.");
         Ok(Crypto::generate_aes_cipher(&key))
