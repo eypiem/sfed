@@ -22,7 +22,7 @@ sfed encrypt <PLAIN_TEXT> <CIPHER_TEXT> <KEY_PATH>
 
 ### Decrypt a file:
 ```bash
-sfed decrypt <PLAIN_TEXT> <CIPHER_TEXT> <KEY_PATH>
+sfed decrypt <CIPHER_TEXT> <PLAIN_TEXT> <KEY_PATH>
 ```
 
 
