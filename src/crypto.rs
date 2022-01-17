@@ -9,6 +9,77 @@ const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const SALT_LEN: usize = 12;
 
+struct AesKey {
+    nonce: Nonce,
+    key: Vec<u8>,
+    cipher: Aes256GcmSiv,
+}
+
+impl AesKey {
+    fn parse(nonce: &[u8], key: Vec<u8>) -> AesKey {
+        let nonce = Nonce::from_slice(nonce);
+        let cipher = AesKey::generate_cipher(&key);
+        AesKey {
+            nonce: *nonce,
+            key: key,
+            cipher: cipher,
+        }
+    }
+
+    fn new() -> AesKey {
+        AesKey::parse(&AesKey::new_nonce(), AesKey::new_key())
+    }
+
+    fn new_nonce() -> [u8; NONCE_LEN] {
+        let nonce: [u8; NONCE_LEN] = rand::random();
+        nonce
+    }
+
+    fn new_key() -> Vec<u8> {
+        let key: [u8; KEY_LEN] = rand::random();
+        key.to_vec()
+    }
+
+    fn generate_cipher(key: &Vec<u8>) -> Aes256GcmSiv {
+        let key = Key::from_slice(&key);
+        Aes256GcmSiv::new(key)
+    }
+}
+
+struct Pbkdf2Key {
+    salt: String,
+    hash: Vec<u8>,
+}
+
+impl Pbkdf2Key {
+    fn parse(salt: String, password: &String) -> Result<Pbkdf2Key> {
+        let hash = Pbkdf2Key::hash_password(password.as_bytes(), &salt)?;
+        Ok(Pbkdf2Key {
+            salt: salt,
+            hash: hash,
+        })
+    }
+
+    fn new(password: &String) -> Result<Pbkdf2Key> {
+        Pbkdf2Key::parse(Pbkdf2Key::new_salt(), password)
+    }
+
+    fn new_salt() -> String {
+        rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(SALT_LEN)
+            .map(char::from)
+            .collect()
+    }
+
+    fn hash_password(password: &[u8], salt: &String) -> Result<Vec<u8>> {
+        match Pbkdf2.hash_password(password, &salt) {
+            Ok(hash) => Ok(hash.hash.unwrap().as_bytes()[0..KEY_LEN].to_vec()),
+            Err(_) => Err(anyhow!("PBKDF2 hash error.")),
+        }
+    }
+}
+
 pub struct Crypto {
     pub password: String,
     pub key_path: std::path::PathBuf,
@@ -17,37 +88,37 @@ pub struct Crypto {
 impl Crypto {
     pub fn create_key(&self) -> Result<()> {
         println!("Creating key...");
-        let pbkdf2_salt = Crypto::new_pbkdf2_salt();
-        let pbkdf2_key = Crypto::generate_pbkdf2_key(self.password.as_bytes(), &pbkdf2_salt)?;
-        let cipher = Crypto::generate_aes_cipher(&pbkdf2_key);
+        let pbkdf2_key = Pbkdf2Key::new(&self.password)?;
+        let file_aes_key = AesKey::new();
+        let pw_aes_key = AesKey::parse(&file_aes_key.nonce, pbkdf2_key.hash);
 
-        let aes_nonce = Crypto::new_aes_nonce();
-        let aes_key = Crypto::new_aes_key();
+        let file_aes_key_ciphertext = Crypto::encrypt(&file_aes_key.key, &pw_aes_key)?;
 
-        let encrypted_key = Crypto::encrypt(&aes_key, &cipher, &aes_nonce)?;
+        let key_vec = Crypto::serialize_key(
+            pbkdf2_key.salt.as_bytes(),
+            &file_aes_key.nonce,
+            &file_aes_key_ciphertext,
+        );
 
-        let key_content =
-            Crypto::create_key_content(pbkdf2_salt.as_bytes(), &aes_nonce, &encrypted_key);
-
-        write_file(&self.key_path, key_content, true)?;
+        write_file(&self.key_path, key_vec, true)?;
         Ok(println!("Created key at {}.", self.key_path.display()))
     }
 
     pub fn change_password(&mut self, new_password: String) -> Result<()> {
-        let aes_key = self.load_aes_key()?;
-        let aes_nonce = self.load_aes_nonce()?;
+        let file_aes_key = self.parse_file_aes_key()?;
         self.password = new_password;
+        let pbkdf2_key = Pbkdf2Key::new(&self.password)?;
+        let pw_aes_key = AesKey::parse(&file_aes_key.nonce, pbkdf2_key.hash);
 
-        let pbkdf2_salt = Crypto::new_pbkdf2_salt();
-        let pbkdf2_key = Crypto::generate_pbkdf2_key(self.password.as_bytes(), &pbkdf2_salt)?;
-        let cipher = Crypto::generate_aes_cipher(&pbkdf2_key);
+        let file_aes_key_ciphertext = Crypto::encrypt(&file_aes_key.key, &pw_aes_key)?;
 
-        let encrypted_key = Crypto::encrypt(&aes_key, &cipher, &aes_nonce)?;
+        let key_vec = Crypto::serialize_key(
+            pbkdf2_key.salt.as_bytes(),
+            &file_aes_key.nonce,
+            &file_aes_key_ciphertext,
+        );
 
-        let key_content =
-            Crypto::create_key_content(pbkdf2_salt.as_bytes(), &aes_nonce, &encrypted_key);
-
-        write_file(&self.key_path, key_content, false)?;
+        write_file(&self.key_path, key_vec, false)?;
         Ok(println!(
             "Changed the password of key at {}.",
             self.key_path.display()
@@ -59,10 +130,9 @@ impl Crypto {
         input: std::path::PathBuf,
         output: std::path::PathBuf,
     ) -> Result<()> {
-        let nonce = self.load_aes_nonce()?;
-        let cipher = self.load_aes_cipher()?;
+        let aes_key = self.parse_file_aes_key()?;
         let content = read_file(&input)?;
-        let cipher_text = Crypto::encrypt(&content, &cipher, &nonce)?;
+        let cipher_text = Crypto::encrypt(&content, &aes_key)?;
         write_file(&output, cipher_text, true)?;
         Ok(println!("File encrypted at {}.", output.display()))
     }
@@ -72,106 +142,64 @@ impl Crypto {
         input: std::path::PathBuf,
         output: std::path::PathBuf,
     ) -> Result<()> {
-        let nonce = self.load_aes_nonce()?;
-        let cipher = self.load_aes_cipher()?;
+        let aes_key = self.parse_file_aes_key()?;
         let content = read_file(&input)?;
-        let plain_text = Crypto::decrypt(&content, &cipher, &nonce)?;
+        let plain_text = Crypto::decrypt(&content, &aes_key)?;
         write_file(&output, plain_text, true)?;
         Ok(println!("File decrypted at {}.", output.display()))
     }
-    
-    fn create_key_content(pbkdf2_salt: &[u8], aes_nonce: &[u8], encrypted_key: &[u8]) -> Vec<u8> {
-        let mut key_content = Vec::new();
-        key_content.extend(pbkdf2_salt);
-        key_content.push(b'\n');
-        key_content.extend(aes_nonce);
-        key_content.push(b'\n');
-        key_content.extend(encrypted_key);
-        key_content.push(b'\n');
-        key_content
+
+    fn parse_pbkdf2_key(&self) -> Result<Pbkdf2Key> {
+        let key_vec = read_file(&self.key_path)?;
+        let pbkdf2_salt = String::from_utf8(key_vec[0..SALT_LEN].to_vec())?;
+        Pbkdf2Key::parse(pbkdf2_salt, &self.password)
     }
 
-    fn encrypt(input: &Vec<u8>, cipher: &Aes256GcmSiv, nonce: &Nonce) -> Result<Vec<u8>> {
-        match cipher.encrypt(nonce, input.as_ref()) {
-            Ok(plain_text) => Ok(plain_text),
-            Err(_) => Err(anyhow!("Encryption failure!.")),
-        }
+    fn parse_pw_aes_key(&self, nonce: &[u8]) -> Result<AesKey> {
+        let pbkdf2_key = self.parse_pbkdf2_key()?;
+        Ok(AesKey::parse(nonce, pbkdf2_key.hash))
     }
 
-    fn decrypt(input: &Vec<u8>, cipher: &Aes256GcmSiv, nonce: &Nonce) -> Result<Vec<u8>> {
-        match cipher.decrypt(nonce, input.as_ref()) {
-            Ok(plain_text) => Ok(plain_text),
-            Err(_) => Err(anyhow!("Decryption failure!.")),
-        }
-    }
+    fn parse_file_aes_key(&self) -> Result<AesKey> {
+        let key_vec = read_file(&self.key_path)?;
+        let nonce = &key_vec[SALT_LEN + 1..SALT_LEN + NONCE_LEN + 1];
+        let aes_key_ciphertext = key_vec[SALT_LEN + NONCE_LEN + 2..key_vec.len() - 1].to_vec();
 
-    fn new_pbkdf2_salt() -> String {
-        rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(SALT_LEN)
-            .map(char::from)
-            .collect()
-    }
-
-    fn load_pbkdf2_salt(&self) -> Result<String> {
-        let key_content = read_file(&self.key_path)?;
-        Ok(String::from_utf8(key_content[0..SALT_LEN].to_vec())?)
-    }
-
-    fn load_pbkdf2_key(&self) -> Result<Vec<u8>> {
-        let salt = self.load_pbkdf2_salt()?;
-        Crypto::generate_pbkdf2_key(self.password.as_bytes(), &salt)
-    }
-
-    fn generate_pbkdf2_key(password: &[u8], salt: &String) -> Result<Vec<u8>> {
-        match Pbkdf2.hash_password(password, &salt) {
-            Ok(hash) => Ok(hash.hash.unwrap().as_bytes()[0..KEY_LEN].to_vec()),
-            Err(_) => Err(anyhow!("PBKDF2 hash error.")),
-        }
-    }
-
-    fn new_aes_nonce() -> Nonce {
-        let nonce: [u8; NONCE_LEN] = rand::random();
-        *Nonce::from_slice(&nonce)
-    }
-
-    fn new_aes_key() -> Vec<u8> {
-        let key: [u8; KEY_LEN] = rand::random();
-        key.to_vec()
-    }
-
-    fn read_aes_nonce(&self) -> Result<Vec<u8>> {
-        let key_content = read_file(&self.key_path)?;
-        Ok(key_content[SALT_LEN + 1..SALT_LEN + NONCE_LEN + 1].to_vec())
-    }
-
-    fn read_aes_key(&self) -> Result<Vec<u8>> {
-        let key_content = read_file(&self.key_path)?;
-        Ok(key_content[SALT_LEN + NONCE_LEN + 2..key_content.len() - 1].to_vec())
-    }
-
-    fn load_aes_nonce(&self) -> Result<Nonce> {
-        Ok(*Nonce::from_slice(&self.read_aes_nonce()?))
-    }
-
-    fn load_aes_key(&self) -> Result<Vec<u8>> {
-        let nonce = self.load_aes_nonce()?;
-        let key = self.read_aes_key()?;
-        let cipher = Crypto::generate_aes_cipher(&self.load_pbkdf2_key()?);
-        Crypto::decrypt(&key, &cipher, &nonce)
-    }
-
-    fn load_aes_cipher(&self) -> Result<Aes256GcmSiv> {
-        let key = match self.load_aes_key() {
+        let pw_aes_key = self.parse_pw_aes_key(nonce)?;
+        let aes_key = match Crypto::decrypt(&aes_key_ciphertext, &pw_aes_key) {
             Ok(key) => key,
             Err(_) => return Err(anyhow!("Key authentication failure.")),
         };
         println!("Key authenticated.");
-        Ok(Crypto::generate_aes_cipher(&key))
+        Ok(AesKey::parse(nonce, aes_key))
     }
 
-    fn generate_aes_cipher(key: &Vec<u8>) -> Aes256GcmSiv {
-        let key = Key::from_slice(&key);
-        Aes256GcmSiv::new(key)
+    fn serialize_key(
+        pbkdf2_salt: &[u8],
+        aes_nonce: &[u8],
+        file_aes_key_ciphertext: &[u8],
+    ) -> Vec<u8> {
+        let mut key_vec = Vec::new();
+        key_vec.extend(pbkdf2_salt);
+        key_vec.push(b'\n');
+        key_vec.extend(aes_nonce);
+        key_vec.push(b'\n');
+        key_vec.extend(file_aes_key_ciphertext);
+        key_vec.push(b'\n');
+        key_vec
+    }
+
+    fn encrypt(input: &Vec<u8>, aes_key: &AesKey) -> Result<Vec<u8>> {
+        match aes_key.cipher.encrypt(&aes_key.nonce, input.as_ref()) {
+            Ok(plain_text) => Ok(plain_text),
+            Err(_) => Err(anyhow!("Encryption failure!")),
+        }
+    }
+
+    fn decrypt(input: &Vec<u8>, aes_key: &AesKey) -> Result<Vec<u8>> {
+        match aes_key.cipher.decrypt(&aes_key.nonce, input.as_ref()) {
+            Ok(plain_text) => Ok(plain_text),
+            Err(_) => Err(anyhow!("Decryption failure!")),
+        }
     }
 }
