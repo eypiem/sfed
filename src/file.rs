@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::io::{self, Write};
 
@@ -10,7 +10,7 @@ pub fn read_file(file_path: &std::path::PathBuf) -> Result<Vec<u8>> {
 pub fn write_file(file_path: &std::path::PathBuf, content: Vec<u8>, safe: bool) -> Result<()> {
     if safe {
         if !check_overwrite(file_path) {
-            panic!("Writing to output file canceled.");
+            return Err(anyhow!("Writing to output file canceled."));
         }
     }
     match file_path.parent() {
